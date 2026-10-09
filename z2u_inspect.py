@@ -1,12 +1,12 @@
 """z2u-inspect: one-off scan of the z2u 'sell / add offer' form.
 
 Opens the sell form with your Z2U_COOKIES. On /sell/create it types the game
-name, picks the game and the category (default: Clash Of Clans (Global) ->
-Accounts), then lists every form field (type, name, label, dropdown options)
-and buttons, and saves a screenshot. This is step 1 of auto-listing.
+name and clicks the category label (default: Accounts) inside the game's
+suggestion row (default: Clash Of Clans (Global)), then lists every form field
+(type, name, label, dropdown options) and buttons, and saves a screenshot.
 It NEVER clicks submit, never prints cookie values and never reads input values.
 """
-import json, os, sys
+import json, os, re, sys
 from playwright.sync_api import sync_playwright
 from z2u_online import load_cookies, state, log, UA
 
@@ -51,85 +51,56 @@ SCAN_JS = r"""
   const buttons = [...document.querySelectorAll('button, [role=button], input[type=submit]')]
     .filter(vis).map(b => (b.innerText || b.value || '').replace(/\s+/g, ' ').trim())
     .filter(Boolean).slice(0, 80);
-  const links = [...document.querySelectorAll('a[href]')]
-    .filter(a => /sell|offer|publish|post/i.test(a.getAttribute('href') + ' ' + a.innerText))
-    .map(a => ({ text: a.innerText.replace(/\s+/g, ' ').trim().slice(0, 60), href: a.href.split('?')[0] }))
-    .slice(0, 60);
-  return { fields, buttons, links };
-}
-"""
-
-FIND_JS = r"""
-(pat) => {
-  const re = new RegExp(pat, 'i');
-  const out = [];
-  for (const e of document.querySelectorAll('body *')) {
-    if (e.children.length > 3) continue;
-    const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
-    if (!t || t.length > 80 || !re.test(t)) continue;
-    const r = e.getBoundingClientRect();
-    if (!(r.width > 0 && r.height > 0)) continue;
-    const cls = String(e.className || '').trim().replace(/\s+/g, '.').slice(0, 60);
-    out.push(e.tagName.toLowerCase() + (cls ? '.' + cls : '') + ' -> ' + t);
-    if (out.length >= 40) break;
-  }
-  return out;
+  return { fields, buttons };
 }
 """
 
 
-def show(page, pattern, title):
-    try:
-        items = page.evaluate(FIND_JS, pattern)
-    except Exception as e:
-        log(f"{title}: scan failed ({e.__class__.__name__})")
-        return
-    print(f"--- {title} ({len(items)}) ---", flush=True)
-    for it in items:
-        print("  " + it, flush=True)
+def game_row(page):
+    title = re.compile(r"^\s*" + re.escape(GAME_PICK) + r"\s*$", re.I)
+    return page.locator("li.labelListLi").filter(
+        has=page.locator("div.bigTitle", has_text=title)).first
 
 
-def click_text(page, text):
-    loc = page.get_by_text(text, exact=True)
-    for i in range(min(loc.count(), 15)):
-        el = loc.nth(i)
-        try:
-            if el.is_visible():
-                el.click(timeout=10000)
-                return True
-        except Exception:
-            continue
-    return False
-
-
-def pick_game_and_category(page):
+def pick_game_and_category(ctx, page):
     kw = page.locator("#keywords")
     if kw.count() == 0:
         log("no search box on this page, skipping game/category pick")
-        return
+        return page
     box = kw.first
     box.click()
     box.fill("")
     box.type(GAME_SEARCH, delay=80)
     page.wait_for_timeout(4000)
-    show(page, "clash", "game suggestions")
-    if click_text(page, GAME_PICK):
-        log(f"picked game: {GAME_PICK}")
-    else:
-        log(f"game '{GAME_PICK}' not found in suggestions")
-        return
-    page.wait_for_timeout(5000)
-    show(page, "account", "category options")
-    if click_text(page, CATEGORY):
-        log(f"picked category: {CATEGORY}")
-    else:
-        log(f"category '{CATEGORY}' not found")
-        return
+
+    row = game_row(page)
+    if row.count() == 0:
+        log(f"suggestion row for '{GAME_PICK}' not found")
+        return page
+    try:
+        html = row.evaluate("e => e.outerHTML")
+        print("--- game row HTML (first 2500 chars) ---", flush=True)
+        print(re.sub(r"\s+", " ", html)[:2500], flush=True)
+    except Exception:
+        pass
+
+    cat = row.get_by_text(CATEGORY, exact=True)
+    if cat.count() == 0:
+        log(f"category '{CATEGORY}' not found inside the '{GAME_PICK}' row")
+        return page
+    pages_before = len(ctx.pages)
+    cat.first.click(timeout=10000)
+    log(f"clicked: {GAME_PICK} -> {CATEGORY}")
+    page.wait_for_timeout(3000)
+    if len(ctx.pages) > pages_before:
+        page = ctx.pages[-1]
+        log("category opened in a new tab, switched to it")
     try:
         page.wait_for_load_state("domcontentloaded", timeout=60000)
     except Exception:
         pass
     page.wait_for_timeout(6000)
+    return page
 
 
 def main():
@@ -143,7 +114,8 @@ def main():
         ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
         ctx.add_cookies(cookies)
         page = ctx.new_page()
-        page.goto(TARGET_URL or START_URL, wait_until="domcontentloaded", timeout=90000)
+        page.goto(TARGET_URL or "https://www.z2u.com/sell/create",
+                  wait_until="domcontentloaded", timeout=90000)
         page.wait_for_timeout(6000)
         st = state(page)
         log(f"status: {st}")
@@ -152,24 +124,11 @@ def main():
             browser.close()
             sys.exit(f"status = {st}, cannot inspect the sell form.")
 
-        if not TARGET_URL:
-            sell = page.locator(r'a:text-matches("^\s*sell", "i")').first
-            if sell.count() > 0:
-                log("no TARGET_URL given, clicking the site's 'Sell' link")
-                try:
-                    sell.click(timeout=15000)
-                    page.wait_for_load_state("domcontentloaded", timeout=60000)
-                    page.wait_for_timeout(6000)
-                except Exception as e:
-                    log(f"could not open Sell link: {e.__class__.__name__}")
-            else:
-                log("no 'Sell' link found on the home page")
-
         if "/sell/create" in page.url.lower():
             try:
-                pick_game_and_category(page)
+                page = pick_game_and_category(ctx, page)
             except Exception as e:
-                log(f"game/category pick problem: {e.__class__.__name__}")
+                log(f"game/category pick problem: {e.__class__.__name__}: {str(e)[:200]}")
 
         data = page.evaluate(SCAN_JS)
         data["url"] = page.url
