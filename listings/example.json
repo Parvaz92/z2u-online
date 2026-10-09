@@ -1,0 +1,32 @@
+{
+  "title": "TEST LISTING - DO NOT PUBLISH",
+  "description": "Test description for dry run.",
+  "product_types": {
+    "Platform": "Android",
+    "Device": "Android"
+  },
+  "town_hall": "Town Hall Level 15+",
+  "images": [],
+  "currency": "USD",
+  "price": 50,
+  "min_unit": 1,
+  "stock": 1,
+  "require_integer": "No",
+  "bk_amount": 1,
+  "bk_level": "76-90",
+  "aq_level": "76-90",
+  "gw_level": "51-65",
+  "rc_level": "31-40",
+  "aq_amount": 1,
+  "gw_amount": 1,
+  "rc_amount": 1,
+  "registration_time": "2018-12-31",
+  "gems": 500,
+  "war_stars": 1000,
+  "cwl_medals": 2000,
+  "hero_skins": 5,
+  "experience_level": 200,
+  "expiration": "30Days",
+  "delivery_eta": "1 Hours",
+  "publish": "Publish Immediately"
+}
