@@ -20,7 +20,8 @@ LOGGED_OUT = r"text=/^\s*(sign ?in|log ?in)\s*$/i"
 
 
 def log(msg):
-    print(f"[{datetime.datetime.utcnow():%H:%M:%S} UTC] {msg}", flush=True)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    print(f"[{now:%H:%M:%S} UTC] {msg}", flush=True)
 
 
 def load_cookies():
