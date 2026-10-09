@@ -1,0 +1,59 @@
+name: z2u post listing
+
+on:
+  workflow_dispatch:
+    inputs:
+      listing:
+        description: "Listing file in the repo"
+        required: true
+        default: "listings/example.json"
+      mode:
+        description: "dry-run = fill only, publish = really submit"
+        required: true
+        type: choice
+        options:
+          - dry-run
+          - publish
+        default: dry-run
+
+permissions:
+  contents: read
+
+concurrency:
+  group: z2u-post
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Fill listing form
+        env:
+          Z2U_COOKIES: ${{ secrets.Z2U_COOKIES }}
+          LISTING: ${{ inputs.listing }}
+          MODE: ${{ inputs.mode }}
+        run: python z2u_post.py
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: post
+          path: post/
+          retention-days: 1
