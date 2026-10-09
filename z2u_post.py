@@ -190,7 +190,7 @@ def show_messages(page, title):
             print("    " + m, flush=True)
 
 
-DROPDOWN_KINDS = 'button, [role=button], .dropdown-toggle, [class*="select"]'
+DROPDOWN_KINDS = '.dropdown-toggle, button, [role=button], [role=combobox]'
 
 
 def norm(s):
@@ -199,13 +199,13 @@ def norm(s):
 
 def set_dropdown(page, label, value, key):
     if not mark(page, label, DROPDOWN_KINDS, key):
-        log(f"MISSING select: {label}")
-        return
+        log(f"MISSING dropdown: {label}")
+        return False
     try:
         page.locator(f'[data-z2u="{key}"]').first.click(timeout=8000)
     except Exception as e:
         log(f"could not open dropdown {label}: {e.__class__.__name__}")
-        return
+        return False
     page.wait_for_timeout(1500)
     items = js(page, "(k) => window.__z2u.menuItems(k)", key)
     log(f"dropdown {label} options: {' | '.join(items) if items else '(none found)'}")
@@ -216,10 +216,11 @@ def set_dropdown(page, label, value, key):
     if idx is None:
         log(f"VALUE NOT FOUND for {label}: {value!r}")
         page.keyboard.press("Escape")
-        return
+        return False
     page.locator(f'[data-z2u-opt="{idx}"]').first.click(timeout=8000)
     log(f"set {label} = {items[idx]}")
     page.wait_for_timeout(1000)
+    return True
 
 
 def set_select(page, label, value, key):
@@ -284,7 +285,11 @@ def fill_form(ctx, page, d):
     page.wait_for_timeout(2500)
     install(page)
     for i, (label, value) in enumerate((d.get("product_types") or {}).items()):
-        set_select(page, label, value, f"pt{i}")
+        if mark(page, label, "select", f"ps{i}"):
+            r = js(page, "([k, v]) => window.__z2u.select(k, v)", [f"ps{i}", "zzzz-list-only"])
+            log(f"{label} hidden select options: {' | '.join(r.get('options', []))}")
+        if not set_dropdown(page, label, value, f"pt{i}"):
+            set_select(page, label, value, f"pt{i}")
         page.wait_for_timeout(1500)
         install(page)
 
