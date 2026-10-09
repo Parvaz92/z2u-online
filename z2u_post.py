@@ -3,7 +3,7 @@
 MODE=dry-run (default): fills the whole form and takes screenshots, does NOT submit.
 MODE=publish: same, then ticks the terms box and clicks Submit.
 Listing data lives in listings/<name>.json (see listings/example.json).
-Image paths inside the repo are turned into public raw.githubusercontent.com links.
+Images must be direct links on a host z2u accepts (imgur, postimages, dropbox, flickr...).
 Never prints cookie values.
 """
 import json, os, sys
@@ -135,6 +135,21 @@ HELPERS_JS = r"""
         return { label: lab, options: [...s.options].map(o => o.text.trim()).slice(0, 40) };
       });
     },
+    menuItems(key) {
+      const b = document.querySelector('[data-z2u="' + key + '"]');
+      if (!b) return [];
+      document.querySelectorAll('[data-z2u-opt]').forEach(e => e.removeAttribute('data-z2u-opt'));
+      let anc = b.parentElement;
+      for (let k = 0; k < 4 && anc; k++, anc = anc.parentElement) {
+        const items = [...anc.querySelectorAll('li, .dropdown-item, [role=option]')].filter(e =>
+            vis(e) && !e.contains(b) && !b.contains(e) && e.children.length <= 3 &&
+            (e.innerText || '').trim() && (e.innerText || '').trim().length < 60);
+        if (items.length) {
+          return items.map((e, i) => { e.setAttribute('data-z2u-opt', String(i)); return (e.innerText || '').replace(/\s+/g, ' ').trim(); });
+        }
+      }
+      return [];
+    },
     messages() {
       const sel = '[class*="layer"],[class*="toast"],[class*="msg"],[class*="alert"],[class*="error"],.help-block,.invalid-feedback';
       const out = [];
@@ -175,11 +190,43 @@ def show_messages(page, title):
             print("    " + m, flush=True)
 
 
+DROPDOWN_KINDS = 'button, [role=button], .dropdown-toggle, [class*="select"]'
+
+
+def norm(s):
+    return " ".join(str(s).replace("*", "").replace(":", "").split()).lower()
+
+
+def set_dropdown(page, label, value, key):
+    if not mark(page, label, DROPDOWN_KINDS, key):
+        log(f"MISSING select: {label}")
+        return
+    try:
+        page.locator(f'[data-z2u="{key}"]').first.click(timeout=8000)
+    except Exception as e:
+        log(f"could not open dropdown {label}: {e.__class__.__name__}")
+        return
+    page.wait_for_timeout(1500)
+    items = js(page, "(k) => window.__z2u.menuItems(k)", key)
+    log(f"dropdown {label} options: {' | '.join(items) if items else '(none found)'}")
+    w = norm(value)
+    idx = next((i for i, t in enumerate(items) if norm(t) == w), None)
+    if idx is None:
+        idx = next((i for i, t in enumerate(items) if w in norm(t)), None)
+    if idx is None:
+        log(f"VALUE NOT FOUND for {label}: {value!r}")
+        page.keyboard.press("Escape")
+        return
+    page.locator(f'[data-z2u-opt="{idx}"]').first.click(timeout=8000)
+    log(f"set {label} = {items[idx]}")
+    page.wait_for_timeout(1000)
+
+
 def set_select(page, label, value, key):
     if value in (None, ""):
         return
     if not mark(page, label, "select", key):
-        log(f"MISSING select: {label}")
+        set_dropdown(page, label, value, key)
         return
     r = js(page, "([k, v]) => window.__z2u.select(k, v)", [key, str(value)])
     if r.get("ok"):
@@ -214,32 +261,17 @@ def click_marked(page, key, what):
         return False
 
 
+IMAGE_HOSTS = ("imgur.com", "dropbox.com", "dropboxusercontent.com", "flickr.com",
+               "staticflickr.com", "500px.com", "500px.org", "postimages.org",
+               "postimg.cc", "hizliresim.com")
+
+
 def image_url(path):
-    if path.startswith("http://") or path.startswith("https://"):
-        return path
-    return f"https://raw.githubusercontent.com/{REPO}/{REF}/{path.lstrip('/')}"
-
-
-def show_supported_domains(ctx, page):
-    try:
-        link = page.get_by_text("list of supported domains", exact=False).first
-        if link.count() == 0:
-            return
-        before = len(ctx.pages)
-        link.click(timeout=8000)
-        page.wait_for_timeout(3000)
-        if len(ctx.pages) > before:
-            p2 = ctx.pages[-1]
-            p2.wait_for_load_state("domcontentloaded", timeout=30000)
-            text = p2.inner_text("body")
-            p2.close()
-        else:
-            text = " / ".join(js(page, "() => window.__z2u.messages()"))
-            page.keyboard.press("Escape")
-        print("--- supported image domains (site text) ---", flush=True)
-        print(" ".join(text.split())[:2000], flush=True)
-    except Exception as e:
-        log(f"could not read supported domains: {e.__class__.__name__}")
+    url = path if path.startswith(("http://", "https://")) else \
+        f"https://raw.githubusercontent.com/{REPO}/{REF}/{path.lstrip('/')}"
+    if not any(h in url.lower() for h in IMAGE_HOSTS):
+        log(f"WARNING: z2u may reject this image host: {url}")
+    return url
 
 
 def fill_form(ctx, page, d):
@@ -251,8 +283,6 @@ def fill_form(ctx, page, d):
         log(f"could not check Attribute radio: {e.__class__.__name__}")
     page.wait_for_timeout(2500)
     install(page)
-    for s in js(page, "() => window.__z2u.sectionSelects('Product Types')"):
-        print(f"    product type select '{s['label']}': {' | '.join(s['options'])}", flush=True)
     for i, (label, value) in enumerate((d.get("product_types") or {}).items()):
         set_select(page, label, value, f"pt{i}")
         page.wait_for_timeout(1500)
@@ -272,9 +302,6 @@ def fill_form(ctx, page, d):
             log("MISSING field: Registration time")
 
     # Images
-    if MODE != "publish":
-        show_supported_domains(ctx, page)
-        install(page)
     url_box = page.get_by_placeholder("Enter image URL").first
     add_btn = page.get_by_role("button", name="Add Image").first
     for path in d.get("images") or []:
