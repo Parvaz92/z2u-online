@@ -1,8 +1,9 @@
 """z2u-inspect: one-off scan of the z2u 'sell / add offer' form.
 
-Opens the sell form with your Z2U_COOKIES, lists every form field (type, name,
-label, dropdown options) and buttons, and saves a screenshot. This is step 1 of
-auto-listing: the real listing script is written from this output.
+Opens the sell form with your Z2U_COOKIES. On /sell/create it types the game
+name, picks the game and the category (default: Clash Of Clans (Global) ->
+Accounts), then lists every form field (type, name, label, dropdown options)
+and buttons, and saves a screenshot. This is step 1 of auto-listing.
 It NEVER clicks submit, never prints cookie values and never reads input values.
 """
 import json, os, sys
@@ -11,6 +12,9 @@ from z2u_online import load_cookies, state, log, UA
 
 START_URL = "https://www.z2u.com/"
 TARGET_URL = (os.environ.get("TARGET_URL") or "").strip()
+GAME_SEARCH = os.environ.get("GAME_SEARCH") or "Clash of Clans"
+GAME_PICK = os.environ.get("GAME_PICK") or "Clash Of Clans (Global)"
+CATEGORY = os.environ.get("CATEGORY") or "Accounts"
 OUT_DIR = "inspect"
 
 SCAN_JS = r"""
@@ -55,6 +59,78 @@ SCAN_JS = r"""
 }
 """
 
+FIND_JS = r"""
+(pat) => {
+  const re = new RegExp(pat, 'i');
+  const out = [];
+  for (const e of document.querySelectorAll('body *')) {
+    if (e.children.length > 3) continue;
+    const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
+    if (!t || t.length > 80 || !re.test(t)) continue;
+    const r = e.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) continue;
+    const cls = String(e.className || '').trim().replace(/\s+/g, '.').slice(0, 60);
+    out.push(e.tagName.toLowerCase() + (cls ? '.' + cls : '') + ' -> ' + t);
+    if (out.length >= 40) break;
+  }
+  return out;
+}
+"""
+
+
+def show(page, pattern, title):
+    try:
+        items = page.evaluate(FIND_JS, pattern)
+    except Exception as e:
+        log(f"{title}: scan failed ({e.__class__.__name__})")
+        return
+    print(f"--- {title} ({len(items)}) ---", flush=True)
+    for it in items:
+        print("  " + it, flush=True)
+
+
+def click_text(page, text):
+    loc = page.get_by_text(text, exact=True)
+    for i in range(min(loc.count(), 15)):
+        el = loc.nth(i)
+        try:
+            if el.is_visible():
+                el.click(timeout=10000)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def pick_game_and_category(page):
+    kw = page.locator("#keywords")
+    if kw.count() == 0:
+        log("no search box on this page, skipping game/category pick")
+        return
+    box = kw.first
+    box.click()
+    box.fill("")
+    box.type(GAME_SEARCH, delay=80)
+    page.wait_for_timeout(4000)
+    show(page, "clash", "game suggestions")
+    if click_text(page, GAME_PICK):
+        log(f"picked game: {GAME_PICK}")
+    else:
+        log(f"game '{GAME_PICK}' not found in suggestions")
+        return
+    page.wait_for_timeout(5000)
+    show(page, "account", "category options")
+    if click_text(page, CATEGORY):
+        log(f"picked category: {CATEGORY}")
+    else:
+        log(f"category '{CATEGORY}' not found")
+        return
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=60000)
+    except Exception:
+        pass
+    page.wait_for_timeout(6000)
+
 
 def main():
     cookies = load_cookies()
@@ -89,8 +165,14 @@ def main():
             else:
                 log("no 'Sell' link found on the home page")
 
+        if "/sell/create" in page.url.lower():
+            try:
+                pick_game_and_category(page)
+            except Exception as e:
+                log(f"game/category pick problem: {e.__class__.__name__}")
+
         data = page.evaluate(SCAN_JS)
-        data["url"] = page.url.split("?")[0]
+        data["url"] = page.url
         data["title"] = page.title()
         with open(f"{OUT_DIR}/form.json", "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -101,18 +183,15 @@ def main():
     print(f"PAGE: {data['title']} | {data['url']}")
     print(f"FIELDS ({len(data['fields'])}):")
     for fl in data["fields"]:
-        if not fl["visible"]:
+        if not fl["visible"] and not fl["name"]:
             continue
         line = (f"  #{fl['i']} {fl['tag']}[{fl['type']}] name={fl['name']!r} id={fl['id']!r} "
                 f"label={fl['label']!r} placeholder={fl['placeholder']!r}"
-                f"{' REQUIRED' if fl['required'] else ''}")
+                f"{' REQUIRED' if fl['required'] else ''}{'' if fl['visible'] else ' (not visible)'}")
         print(line)
         if fl.get("options"):
             print("      options: " + " | ".join(fl["options"][:25]))
     print("BUTTONS: " + " | ".join(data["buttons"]))
-    print("SELL/OFFER LINKS:")
-    for ln in data["links"][:30]:
-        print(f"  {ln['text']!r} -> {ln['href']}")
     print("=" * 60, flush=True)
     log("inspect done. Nothing was submitted.")
 
