@@ -104,6 +104,23 @@ HELPERS_JS = r"""
       }
       return false;
     },
+    markCheck(text, key) {
+      const want = norm(text);
+      for (const c of document.querySelectorAll('input[type=checkbox]')) {
+        let anc = c.parentElement;
+        for (let k = 0; k < 3 && anc; k++, anc = anc.parentElement) {
+          const t = norm(anc.innerText);
+          if (t === want || (t.startsWith(want) && t.length < want.length + 15)) {
+            c.setAttribute('data-z2u', key); return true;
+          }
+        }
+      }
+      return false;
+    },
+    isChecked(key) {
+      const c = document.querySelector('[data-z2u="' + key + '"]');
+      return !!(c && c.checked);
+    },
     select(key, wanted) {
       const el = document.querySelector('[data-z2u="' + key + '"]');
       if (!el || !el.options) return { ok: false, options: [] };
@@ -409,6 +426,44 @@ def image_url(path):
     return url
 
 
+def tick_checkbox(page, text, key):
+    """Tick a checkbox identified by the text next to it. Returns True when checked."""
+    install(page)
+    if not js(page, "([t, k]) => window.__z2u.markCheck(t, k)", [text, key]):
+        log(f"MISSING checkbox: {text}")
+        return False
+    checked = lambda: bool(js(page, "(k) => window.__z2u.isChecked(k)", key))
+    if checked():
+        log(f"checkbox already ticked: {text}")
+        return True
+    box = page.locator(f'[data-z2u="{key}"]').first
+    attempts = [
+        ("text click", lambda: page.get_by_text(text, exact=True).first.click(timeout=5000)),
+        ("checkbox click", lambda: box.click(timeout=5000)),
+        ("checkbox force click", lambda: box.click(timeout=5000, force=True)),
+        ("js", lambda: js(page, """(k) => {
+            const c = document.querySelector('[data-z2u="' + k + '"]');
+            if (!c) return false;
+            c.checked = true;
+            c.dispatchEvent(new Event('click', { bubbles: true }));
+            c.dispatchEvent(new Event('change', { bubbles: true }));
+            if (window.jQuery) { try { window.jQuery(c).prop('checked', true).trigger('change'); } catch (e) {} }
+            return true;
+        }""", key)),
+    ]
+    for name, act in attempts:
+        try:
+            act()
+        except Exception as e:
+            log(f"{text}: {name} failed: {e.__class__.__name__}")
+        page.wait_for_timeout(1200)
+        if checked():
+            log(f"ticked: {text} ({name})")
+            return True
+    log(f"FAILED to tick: {text}")
+    return False
+
+
 def tick_terms(page, submit):
     """Tick 'I have read and agreed...' and wait until Submit is enabled."""
     def ready():
@@ -506,6 +561,12 @@ def fill_form(ctx, page, d):
                                   ["Product Expiration Date", d["expiration"], "exp"]):
         click_marked(page, "exp", f"expiration {d['expiration']}")
     set_select(page, "DELIVERY ETA", d.get("delivery_eta"), "eta")
+    if d.get("order_delivery", True):
+        if not tick_checkbox(page, "Order Delivery", "orderdelivery"):
+            failed.append("Order Delivery")
+        page.wait_for_timeout(1500)
+        install(page)
+        show_messages(page, "after Order Delivery")
     pub = d.get("publish") or "Publish Immediately"
     if js(page, "([t, v, k]) => window.__z2u.markInSection(t, v, k)", ["Publish Time", pub, "pub"]):
         click_marked(page, "pub", pub)
@@ -561,7 +622,7 @@ def main():
         log("screenshot saved: post/filled.png")
 
         if failed:
-            log(f"REQUIRED DROPDOWNS NOT SET: {', '.join(failed)}")
+            log(f"REQUIRED FIELDS NOT SET: {', '.join(failed)}")
         if MODE == "publish" and failed:
             browser.close()
             sys.exit("Not submitting because these required fields are empty: " + ", ".join(failed))
