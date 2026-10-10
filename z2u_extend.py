@@ -34,17 +34,44 @@ def _messages(page):
         return []
 
 
+FIND_JS = r"""
+() => {
+  const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  document.querySelectorAll('[data-z2u-ext]').forEach(e => e.removeAttribute('data-z2u-ext'));
+  const re = /extend/i;
+  const attr = e => ['title', 'aria-label', 'data-original-title', 'data-title', 'value']
+      .map(a => e.getAttribute(a) || '').join(' ');
+  const cands = [...document.querySelectorAll('a, button, span, div, i, input, li, [role=button], [onclick]')]
+      .filter(e => vis(e) && (
+        ((e.innerText || '').trim().length < 30 && re.test(e.innerText || '')) || re.test(attr(e))));
+  // keep the innermost matches only
+  const leaf = cands.filter(e => !cands.some(o => o !== e && e.contains(o)));
+  leaf.forEach((e, i) => e.setAttribute('data-z2u-ext', String(i)));
+  return leaf.length;
+}
+"""
+
+DIAG_JS = r"""
+() => {
+  const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const out = [];
+  for (const e of document.querySelectorAll('a, button, [role=button], [onclick]')) {
+    if (!vis(e)) continue;
+    const t = ((e.innerText || '') + ' ' + (e.getAttribute('title') || '')).replace(/\s+/g, ' ').trim();
+    if (t && t.length < 40 && !out.includes(t)) out.push(t);
+    if (out.length >= 80) break;
+  }
+  return out;
+}
+"""
+
+
 def _extend_buttons(page):
-    loc = page.get_by_text(EXTEND_RE)
-    out = []
-    for i in range(min(loc.count(), 50)):
-        el = loc.nth(i)
-        try:
-            if el.is_visible():
-                out.append(el)
-        except Exception:
-            pass
-    return out
+    try:
+        n = page.evaluate(FIND_JS)
+    except Exception:
+        n = 0
+    return [page.locator(f'[data-z2u-ext="{i}"]').first for i in range(n)]
 
 
 def _confirm(page, before_count):
@@ -76,7 +103,11 @@ def extend_all(ctx, dry_run=False):
         page = ctx.new_page()
         page.on("dialog", lambda d: (log(f"extend: site dialog: {d.message[:200]}"), d.accept()))
         page.goto(MANAGE_URL, wait_until="domcontentloaded", timeout=90000)
-        page.wait_for_timeout(6000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=20000)
+        except Exception:
+            pass
+        page.wait_for_timeout(4000)
         if any(k in page.url.lower() for k in ("login", "signin")):
             log("extend: not logged in, skipped")
             return 0
@@ -85,6 +116,11 @@ def extend_all(ctx, dry_run=False):
         if n == 0:
             for m in _messages(page):
                 log(f"extend: page says: {m}")
+            try:
+                log(f"extend: page = {page.title()} | {page.url.split('?')[0]}")
+                log("extend: clickable texts on page: " + " | ".join(page.evaluate(DIAG_JS)))
+            except Exception:
+                pass
             return 0
         if dry_run:
             return 0
