@@ -3,14 +3,17 @@
 Login = cookies exported from your own browser (Cookie-Editor -> Export -> JSON),
 stored in the repo secret Z2U_COOKIES. No password is ever used or printed.
 The page stays open (so the site's own live connection keeps you online) and is
-refreshed every few minutes. Exits with an error (red X + GitHub email) if you
-get logged out, so you know to refresh the cookies.
+refreshed every few minutes. Every EXTEND_MINUTES (default 60, 0 = off) it also
+presses "Extend" on every offer in Active Offers (see z2u_extend.py).
+Exits with an error (red X + GitHub email) if you get logged out, so you know to
+refresh the cookies.
 """
 import json, os, random, sys, time, datetime
 from playwright.sync_api import sync_playwright
 
 START_URL = os.environ.get("Z2U_URL") or "https://www.z2u.com/"
 RUN_MINUTES = int(os.environ.get("RUN_MINUTES", "345"))   # GitHub job limit is 360
+EXTEND_MINUTES = int(os.environ.get("EXTEND_MINUTES", "60"))
 MIN_WAIT, MAX_WAIT = 3 * 60, 6 * 60                       # refresh every 3-6 min
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
@@ -87,9 +90,23 @@ def human_touch(page):
         pass
 
 
+def maybe_extend(ctx, next_at):
+    """Run Extend on Active Offers when it's time. Returns the next due time."""
+    if EXTEND_MINUTES <= 0 or time.time() < next_at:
+        return next_at
+    try:
+        from z2u_extend import extend_all
+        n = extend_all(ctx)
+        log(f"extend round done ({n} offer(s))")
+    except Exception as e:
+        log(f"extend round failed: {e.__class__.__name__}")
+    return time.time() + EXTEND_MINUTES * 60
+
+
 def main():
     cookies = load_cookies()
     deadline = time.time() + RUN_MINUTES * 60
+    next_extend = time.time() + 60          # first Extend round 1 minute after start
     bad = 0
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True,
@@ -104,9 +121,13 @@ def main():
         log(f"opened, status: {state(page)}")
         rounds = 0
         while time.time() < deadline:
-            time.sleep(min(random.randint(MIN_WAIT, MAX_WAIT), max(1, deadline - time.time())))
+            wait = random.randint(MIN_WAIT, MAX_WAIT)
+            if EXTEND_MINUTES > 0:
+                wait = min(wait, max(1, next_extend - time.time()))
+            time.sleep(min(wait, max(1, deadline - time.time())))
             if time.time() >= deadline:
                 break
+            next_extend = maybe_extend(ctx, next_extend)
             try:
                 page.reload(wait_until="domcontentloaded", timeout=90000)
                 time.sleep(4)
