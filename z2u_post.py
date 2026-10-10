@@ -230,17 +230,16 @@ def norm(s):
     return " ".join(str(s).replace("*", "").replace(":", "").split()).lower()
 
 
-def set_dropdown(page, label, value, key):
+def _open_menu(page, label, key):
     try:
         page.keyboard.press("Escape")
         js(page, "() => document.body.click()")
     except Exception:
         pass
-    page.wait_for_timeout(1500)
+    page.wait_for_timeout(1200)
     install(page)
     if not js(page, "([l, k, y]) => window.__z2u.markVis(l, k, y)", [label, DROPDOWN_KINDS, key]):
-        log(f"MISSING dropdown: {label}")
-        return False
+        return None
     js(page, "() => window.__z2u.snapshot()")
     loc = page.locator(f'[data-z2u="{key}"]').first
     try:
@@ -251,33 +250,107 @@ def set_dropdown(page, label, value, key):
             loc.click(timeout=8000, force=True)
         except Exception as e:
             log(f"could not open dropdown {label}: {e.__class__.__name__}")
-            print(f"--- {label} row HTML ---", flush=True)
-            print(js(page, "(k) => window.__z2u.rowHtml(k)", key), flush=True)
-            return False
-    page.wait_for_timeout(2000)
+            return None
+    page.wait_for_timeout(1800)
     items = js(page, "(k) => window.__z2u.menuItems(k)", key)
     if not items:
         items = js(page, "() => window.__z2u.newItems()")
+    return items
+
+
+def _shown(page, key):
+    try:
+        return norm(page.locator(f'[data-z2u="{key}"]').first.inner_text(timeout=3000))
+    except Exception:
+        return ""
+
+
+def set_dropdown(page, label, value, key):
+    items = _open_menu(page, label, key)
+    if items is None:
+        log(f"MISSING dropdown: {label}")
+        return False
     log(f"dropdown {label} options: {' | '.join(items) if items else '(none found)'}")
     if not items:
         print(f"--- {label} row HTML ---", flush=True)
         print(js(page, "(k) => window.__z2u.rowHtml(k)", key), flush=True)
-    idx = None
+        return False
+    want = None
     for cand in (value if isinstance(value, list) else [value]):
         w = norm(cand)
-        idx = next((i for i, t in enumerate(items) if norm(t) == w), None)
-        if idx is None:
-            idx = next((i for i, t in enumerate(items) if w in norm(t)), None)
-        if idx is not None:
+        if any(norm(t) == w for t in items):
+            want = w
             break
-    if idx is None:
+    if want is None:
         log(f"VALUE NOT FOUND for {label}: {value!r}")
         page.keyboard.press("Escape")
         return False
-    page.locator(f'[data-z2u-opt="{idx}"]').first.click(timeout=8000)
-    log(f"set {label} = {items[idx]}")
-    page.wait_for_timeout(1000)
-    return True
+    hits = [i for i, t in enumerate(items) if norm(t) == want]
+    # try the deepest element first (it usually carries the click handler)
+    for n, _ in enumerate(reversed(hits)):
+        if n > 0:
+            items = _open_menu(page, label, key) or []
+            hits2 = [i for i, t in enumerate(items) if norm(t) == want]
+            if len(hits2) <= n:
+                break
+            idx = list(reversed(hits2))[n]
+        else:
+            idx = list(reversed(hits))[0]
+        try:
+            page.locator(f'[data-z2u-opt="{idx}"]').first.click(timeout=8000)
+        except Exception:
+            try:
+                page.locator(f'[data-z2u-opt="{idx}"]').first.click(timeout=8000, force=True)
+            except Exception as e:
+                log(f"click on option failed: {e.__class__.__name__}")
+                continue
+        page.wait_for_timeout(1200)
+        shown = _shown(page, key)
+        if want in shown and "please select" not in shown:
+            log(f"set {label} = {want} (verified)")
+            return True
+        log(f"{label}: option click #{n + 1} did not stick (shows {shown!r})")
+    # keyboard fallback
+    items = _open_menu(page, label, key)
+    if items is not None:
+        try:
+            page.keyboard.type(want, delay=60)
+            page.wait_for_timeout(800)
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(1200)
+        except Exception:
+            pass
+        shown = _shown(page, key)
+        if want in shown and "please select" not in shown:
+            log(f"set {label} = {want} (verified, keyboard)")
+            return True
+    # hidden <select> in the same row
+    ok = js(page, """([k, w]) => {
+        const b = document.querySelector('[data-z2u="' + k + '"]');
+        if (!b) return false;
+        let anc = b;
+        for (let i = 0; i < 4 && anc.parentElement; i++) {
+            anc = anc.parentElement;
+            const s = anc.querySelector('select');
+            if (!s) continue;
+            const o = [...s.options].find(x => (x.text || '').trim().toLowerCase() === w);
+            if (!o) return false;
+            s.value = o.value; o.selected = true;
+            s.dispatchEvent(new Event('change', { bubbles: true }));
+            if (window.jQuery) { try { const $s = window.jQuery(s); if ($s.selectpicker) $s.selectpicker('refresh'); $s.trigger('change'); } catch (e) {} }
+            return true;
+        }
+        return false;
+    }""", [key, want])
+    page.wait_for_timeout(1200)
+    shown = _shown(page, key)
+    if want in shown and "please select" not in shown:
+        log(f"set {label} = {want} (verified, hidden select)")
+        return True
+    log(f"FAILED to set {label} (hidden select found: {ok}, shows {shown!r})")
+    print(f"--- {label} row HTML ---", flush=True)
+    print(js(page, "(k) => window.__z2u.rowHtml(k)", key), flush=True)
+    return False
 
 
 def set_select(page, label, value, key):
@@ -394,12 +467,10 @@ def fill_form(ctx, page, d):
         log(f"could not check Attribute radio: {e.__class__.__name__}")
     page.wait_for_timeout(2500)
     install(page)
+    failed = []
     for i, (label, value) in enumerate((d.get("product_types") or {}).items()):
-        if mark(page, label, "select", f"ps{i}"):
-            r = js(page, "([k, v]) => window.__z2u.select(k, v)", [f"ps{i}", "zzzz-list-only"])
-            log(f"{label} hidden select options: {' | '.join(r.get('options', []))}")
-        if not set_dropdown(page, label, value, f"pt{i}") and mark(page, label, "select", f"ps{i}"):
-            set_select(page, label, value, f"ps{i}")
+        if not set_dropdown(page, label, value, f"pt{i}"):
+            failed.append(label)
         page.wait_for_timeout(1500)
         install(page)
 
@@ -438,6 +509,7 @@ def fill_form(ctx, page, d):
     pub = d.get("publish") or "Publish Immediately"
     if js(page, "([t, v, k]) => window.__z2u.markInSection(t, v, k)", ["Publish Time", pub, "pub"]):
         click_marked(page, "pub", pub)
+    return failed
 
 
 def main():
@@ -482,12 +554,17 @@ def main():
             browser.close()
             sys.exit("Listing form did not open (no Title field). See post/error.png.")
 
-        fill_form(ctx, page, d)
+        failed = fill_form(ctx, page, d)
         page.wait_for_timeout(1500)
         show_messages(page, "after filling")
         page.screenshot(path=f"{OUT}/filled.png", full_page=True)
         log("screenshot saved: post/filled.png")
 
+        if failed:
+            log(f"REQUIRED DROPDOWNS NOT SET: {', '.join(failed)}")
+        if MODE == "publish" and failed:
+            browser.close()
+            sys.exit("Not submitting because these required fields are empty: " + ", ".join(failed))
         if MODE == "publish":
             install(page)
             submit = page.locator("button.submitSell").last
