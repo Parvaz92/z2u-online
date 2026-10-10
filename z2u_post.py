@@ -497,11 +497,31 @@ def main():
                 browser.close()
                 sys.exit("Submit button stayed disabled: terms checkbox could not be ticked. See post/after_submit.png.")
             before = page.url
+            posts = []
+            page.on("response", lambda r: posts.append(r) if r.request.method == "POST" else None)
             submit.click(timeout=10000)
             log("clicked Submit")
-            page.wait_for_timeout(10000)
-            install(page)
-            show_messages(page, "after submit")
+            seen = []
+            for sec in range(12):
+                page.wait_for_timeout(1000)
+                if sec == 1:
+                    page.screenshot(path=f"{OUT}/after_submit_2s.png", full_page=False)
+                try:
+                    install(page)
+                    for m in js(page, "() => window.__z2u.messages()"):
+                        if m not in seen and "Ctrl+D" not in m:
+                            seen.append(m)
+                            log(f"site message after submit: {m}")
+                except Exception:
+                    pass
+            for r in posts:
+                try:
+                    body = " ".join(r.text().split())[:800]
+                except Exception as e:
+                    body = f"(no body: {e.__class__.__name__})"
+                log(f"POST {r.url.split('?')[0]} -> {r.status}: {body}")
+            if not posts:
+                log("no POST request was sent after Submit (form was blocked by the page itself)")
             page.screenshot(path=f"{OUT}/after_submit.png", full_page=True)
             log(f"page after submit: {page.url}")
             if page.url == before:
