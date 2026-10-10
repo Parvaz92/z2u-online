@@ -3,6 +3,7 @@
 MODE=dry-run (default): fills the whole form and takes screenshots, does NOT submit.
 MODE=publish: same, then ticks the terms box and clicks Submit.
 Listing data lives in listings/<name>.json (see listings/example.json).
+Dropdown values may be a list of candidates; the first one the site offers is used.
 Images must be direct links on a host z2u accepts (imgur, postimages, dropbox, flickr...).
 Never prints cookie values.
 """
@@ -236,10 +237,14 @@ def set_dropdown(page, label, value, key):
     if not items:
         print(f"--- {label} row HTML ---", flush=True)
         print(js(page, "(k) => window.__z2u.rowHtml(k)", key), flush=True)
-    w = norm(value)
-    idx = next((i for i, t in enumerate(items) if norm(t) == w), None)
-    if idx is None:
-        idx = next((i for i, t in enumerate(items) if w in norm(t)), None)
+    idx = None
+    for cand in (value if isinstance(value, list) else [value]):
+        w = norm(cand)
+        idx = next((i for i, t in enumerate(items) if norm(t) == w), None)
+        if idx is None:
+            idx = next((i for i, t in enumerate(items) if w in norm(t)), None)
+        if idx is not None:
+            break
     if idx is None:
         log(f"VALUE NOT FOUND for {label}: {value!r}")
         page.keyboard.press("Escape")
@@ -256,7 +261,11 @@ def set_select(page, label, value, key):
     if not mark(page, label, "select", key):
         set_dropdown(page, label, value, key)
         return
-    r = js(page, "([k, v]) => window.__z2u.select(k, v)", [key, str(value)])
+    r = {}
+    for cand in (value if isinstance(value, list) else [value]):
+        r = js(page, "([k, v]) => window.__z2u.select(k, v)", [key, str(cand)])
+        if r.get("ok"):
+            break
     if r.get("ok"):
         log(f"set {label} = {r['chosen']}")
     else:
