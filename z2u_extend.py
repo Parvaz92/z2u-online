@@ -8,6 +8,7 @@ import re, sys
 from z2u_online import log
 
 MANAGE_URL = "https://www.z2u.com/sell/manage"
+LIST_URL = "https://www.z2u.com/sell/manageList"
 EXTEND_RE = re.compile(r"^\s*extend\s*$", re.I)
 CONFIRM_RE = re.compile(r"^\s*(confirm|ok|yes|sure|submit|extend)\s*$", re.I)
 
@@ -95,53 +96,73 @@ def _confirm(page, before_count):
     return False
 
 
+def _load(page, url):
+    page.goto(url, wait_until="domcontentloaded", timeout=90000)
+    try:
+        page.wait_for_load_state("networkidle", timeout=20000)
+    except Exception:
+        pass
+    page.wait_for_timeout(3000)
+
+
+def _list_pages(page):
+    """Active Offers is split per game/category (sell/manageList?...). Find those links."""
+    _load(page, MANAGE_URL)
+    try:
+        hrefs = page.evaluate("""() => [...new Set([...document.querySelectorAll('a[href*="manageList"]')]
+            .map(a => a.href))]""")
+    except Exception:
+        hrefs = []
+    return hrefs or [LIST_URL]
+
+
+def _extend_on(page, url, dry_run):
+    _load(page, url)
+    n = len(_extend_buttons(page))
+    log(f"extend: {n} Extend button(s) on {url.split('//')[-1][:80]}")
+    if n == 0:
+        try:
+            log("extend: clickable texts on page: " + " | ".join(page.evaluate(DIAG_JS)[:60]))
+        except Exception:
+            pass
+        return 0
+    if dry_run:
+        return 0
+    done = 0
+    for i in range(n):
+        if i > 0:
+            _load(page, url)
+        btns = _extend_buttons(page)
+        if i >= len(btns):
+            break
+        try:
+            btns[i].scroll_into_view_if_needed(timeout=5000)
+            btns[i].click(timeout=8000)
+        except Exception as e:
+            log(f"extend: offer #{i + 1} click failed: {e.__class__.__name__}")
+            continue
+        _confirm(page, len(btns))
+        page.wait_for_timeout(2000)
+        msgs = _messages(page)
+        log(f"extend: offer #{i + 1} extended" + (f" | site: {' / '.join(msgs)}" if msgs else ""))
+        done += 1
+    return done
+
+
 def extend_all(ctx, dry_run=False):
-    """Open Active Offers in a new tab and press Extend on each offer. Never raises."""
+    """Press EXTEND on every offer in Active Offers (all categories). Never raises."""
     page = None
     done = 0
     try:
         page = ctx.new_page()
         page.on("dialog", lambda d: (log(f"extend: site dialog: {d.message[:200]}"), d.accept()))
-        page.goto(MANAGE_URL, wait_until="domcontentloaded", timeout=90000)
-        try:
-            page.wait_for_load_state("networkidle", timeout=20000)
-        except Exception:
-            pass
-        page.wait_for_timeout(4000)
+        urls = _list_pages(page)
         if any(k in page.url.lower() for k in ("login", "signin")):
             log("extend: not logged in, skipped")
             return 0
-        n = len(_extend_buttons(page))
-        log(f"extend: found {n} Extend button(s) on Active Offers")
-        if n == 0:
-            for m in _messages(page):
-                log(f"extend: page says: {m}")
-            try:
-                log(f"extend: page = {page.title()} | {page.url.split('?')[0]}")
-                log("extend: clickable texts on page: " + " | ".join(page.evaluate(DIAG_JS)))
-            except Exception:
-                pass
-            return 0
-        if dry_run:
-            return 0
-        for i in range(n):
-            if i > 0:
-                page.goto(MANAGE_URL, wait_until="domcontentloaded", timeout=90000)
-                page.wait_for_timeout(5000)
-            btns = _extend_buttons(page)
-            if i >= len(btns):
-                break
-            try:
-                btns[i].scroll_into_view_if_needed(timeout=5000)
-                btns[i].click(timeout=8000)
-            except Exception as e:
-                log(f"extend: offer #{i + 1} click failed: {e.__class__.__name__}")
-                continue
-            _confirm(page, len(btns))
-            page.wait_for_timeout(2000)
-            msgs = _messages(page)
-            log(f"extend: offer #{i + 1} extended" + (f" | site: {' / '.join(msgs)}" if msgs else ""))
-            done += 1
+        log(f"extend: {len(urls)} offer list page(s) to check")
+        for url in urls[:10]:
+            done += _extend_on(page, url, dry_run)
     except Exception as e:
         log(f"extend: problem {e.__class__.__name__}: {str(e)[:150]}")
     finally:
