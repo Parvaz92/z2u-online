@@ -74,6 +74,17 @@ HELPERS_JS = r"""
       }
       return false;
     },
+    markVis(label, kinds, key) {
+      for (const lab of labels(norm(label))) {
+        let anc = lab;
+        for (let k = 0; k < 5 && anc; k++, anc = anc.parentElement) {
+          const ctl = [...anc.querySelectorAll(kinds)].find(c => vis(c) &&
+              (lab.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING));
+          if (ctl) { ctl.setAttribute('data-z2u', key); return true; }
+        }
+      }
+      return false;
+    },
     markInSection(title, text, key) {
       const sec = sectionOf(title);
       if (!sec) return false;
@@ -220,15 +231,29 @@ def norm(s):
 
 
 def set_dropdown(page, label, value, key):
-    if not mark(page, label, DROPDOWN_KINDS, key):
+    try:
+        page.keyboard.press("Escape")
+        js(page, "() => document.body.click()")
+    except Exception:
+        pass
+    page.wait_for_timeout(1500)
+    install(page)
+    if not js(page, "([l, k, y]) => window.__z2u.markVis(l, k, y)", [label, DROPDOWN_KINDS, key]):
         log(f"MISSING dropdown: {label}")
         return False
     js(page, "() => window.__z2u.snapshot()")
+    loc = page.locator(f'[data-z2u="{key}"]').first
     try:
-        page.locator(f'[data-z2u="{key}"]').first.click(timeout=8000)
-    except Exception as e:
-        log(f"could not open dropdown {label}: {e.__class__.__name__}")
-        return False
+        loc.scroll_into_view_if_needed(timeout=5000)
+        loc.click(timeout=8000)
+    except Exception:
+        try:
+            loc.click(timeout=8000, force=True)
+        except Exception as e:
+            log(f"could not open dropdown {label}: {e.__class__.__name__}")
+            print(f"--- {label} row HTML ---", flush=True)
+            print(js(page, "(k) => window.__z2u.rowHtml(k)", key), flush=True)
+            return False
     page.wait_for_timeout(2000)
     items = js(page, "(k) => window.__z2u.menuItems(k)", key)
     if not items:
