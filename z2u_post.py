@@ -336,6 +336,55 @@ def image_url(path):
     return url
 
 
+def tick_terms(page, submit):
+    """Tick 'I have read and agreed...' and wait until Submit is enabled."""
+    def ready():
+        try:
+            return submit.is_enabled()
+        except Exception:
+            return False
+
+    if not js(page, "(k) => window.__z2u.markTerms(k)", "terms"):
+        log("terms checkbox not found")
+    box = page.locator('[data-z2u="terms"]').first
+    attempts = [
+        ("text click", lambda: page.get_by_text("I have read and agreed", exact=False).first.click(timeout=5000)),
+        ("checkbox click", lambda: box.click(timeout=5000)),
+        ("checkbox force click", lambda: box.click(timeout=5000, force=True)),
+        ("js", lambda: js(page, """() => {
+            const c = document.querySelector('[data-z2u="terms"]');
+            if (!c) return false;
+            c.checked = true;
+            c.dispatchEvent(new Event('click', { bubbles: true }));
+            c.dispatchEvent(new Event('change', { bubbles: true }));
+            if (window.jQuery) { try { window.jQuery(c).prop('checked', true).trigger('change'); } catch (e) {} }
+            return true;
+        }""")),
+    ]
+    def checked():
+        try:
+            return bool(js(page, "() => { const c = document.querySelector('[data-z2u=\"terms\"]'); return !!(c && c.checked); }"))
+        except Exception:
+            return False
+
+    for name, act in attempts:
+        if ready():
+            break
+        if name != "js" and checked():
+            log(f"terms already checked, skipping {name}")
+            continue
+        try:
+            act()
+        except Exception as e:
+            log(f"terms {name} failed: {e.__class__.__name__}")
+        page.wait_for_timeout(1500)
+        log(f"after terms {name}: submit enabled = {ready()}")
+    if ready():
+        log("terms ticked, Submit is enabled")
+        return True
+    return False
+
+
 def fill_form(ctx, page, d):
     # Product Types
     try:
@@ -441,16 +490,14 @@ def main():
 
         if MODE == "publish":
             install(page)
-            if js(page, "(k) => window.__z2u.markTerms(k)", "terms"):
-                try:
-                    page.locator('[data-z2u="terms"]').check(force=True, timeout=8000)
-                    log("ticked terms checkbox")
-                except Exception as e:
-                    log(f"could not tick terms: {e.__class__.__name__}")
-            else:
-                log("terms checkbox not found")
+            submit = page.locator("button.submitSell").last
+            if not tick_terms(page, submit):
+                page.screenshot(path=f"{OUT}/after_submit.png", full_page=True)
+                show_messages(page, "terms")
+                browser.close()
+                sys.exit("Submit button stayed disabled: terms checkbox could not be ticked. See post/after_submit.png.")
             before = page.url
-            page.get_by_role("button", name="Submit").last.click(timeout=10000)
+            submit.click(timeout=10000)
             log("clicked Submit")
             page.wait_for_timeout(10000)
             install(page)
