@@ -150,6 +150,27 @@ HELPERS_JS = r"""
       }
       return [];
     },
+    snapshot() {
+      window.__z2uSeen = new Set([...document.querySelectorAll('body *')].filter(vis));
+      return true;
+    },
+    newItems() {
+      const seen = window.__z2uSeen || new Set();
+      document.querySelectorAll('[data-z2u-opt]').forEach(e => e.removeAttribute('data-z2u-opt'));
+      const items = [...document.querySelectorAll('body *')].filter(e => {
+        if (seen.has(e) || !vis(e) || e.children.length > 2) return false;
+        const t = (e.innerText || '').trim();
+        return t && t.length < 60 && !/please select/i.test(t);
+      });
+      return items.map((e, i) => { e.setAttribute('data-z2u-opt', String(i)); return (e.innerText || '').replace(/\s+/g, ' ').trim(); });
+    },
+    rowHtml(key) {
+      const b = document.querySelector('[data-z2u="' + key + '"]');
+      if (!b) return '';
+      let anc = b;
+      for (let k = 0; k < 3 && anc.parentElement; k++) anc = anc.parentElement;
+      return anc.outerHTML.replace(/\s+/g, ' ').slice(0, 3000);
+    },
     messages() {
       const sel = '[class*="layer"],[class*="toast"],[class*="msg"],[class*="alert"],[class*="error"],.help-block,.invalid-feedback';
       const out = [];
@@ -201,14 +222,20 @@ def set_dropdown(page, label, value, key):
     if not mark(page, label, DROPDOWN_KINDS, key):
         log(f"MISSING dropdown: {label}")
         return False
+    js(page, "() => window.__z2u.snapshot()")
     try:
         page.locator(f'[data-z2u="{key}"]').first.click(timeout=8000)
     except Exception as e:
         log(f"could not open dropdown {label}: {e.__class__.__name__}")
         return False
-    page.wait_for_timeout(1500)
+    page.wait_for_timeout(2000)
     items = js(page, "(k) => window.__z2u.menuItems(k)", key)
+    if not items:
+        items = js(page, "() => window.__z2u.newItems()")
     log(f"dropdown {label} options: {' | '.join(items) if items else '(none found)'}")
+    if not items:
+        print(f"--- {label} row HTML ---", flush=True)
+        print(js(page, "(k) => window.__z2u.rowHtml(k)", key), flush=True)
     w = norm(value)
     idx = next((i for i, t in enumerate(items) if norm(t) == w), None)
     if idx is None:
@@ -288,8 +315,8 @@ def fill_form(ctx, page, d):
         if mark(page, label, "select", f"ps{i}"):
             r = js(page, "([k, v]) => window.__z2u.select(k, v)", [f"ps{i}", "zzzz-list-only"])
             log(f"{label} hidden select options: {' | '.join(r.get('options', []))}")
-        if not set_dropdown(page, label, value, f"pt{i}"):
-            set_select(page, label, value, f"pt{i}")
+        if not set_dropdown(page, label, value, f"pt{i}") and mark(page, label, "select", f"ps{i}"):
+            set_select(page, label, value, f"ps{i}")
         page.wait_for_timeout(1500)
         install(page)
 
