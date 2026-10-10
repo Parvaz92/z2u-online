@@ -45,10 +45,24 @@ FIND_JS = r"""
   const cands = [...document.querySelectorAll('a, button, span, div, i, input, li, [role=button], [onclick]')]
       .filter(e => vis(e) && (
         ((e.innerText || '').trim().length < 30 && re.test(e.innerText || '')) || re.test(attr(e))));
-  // keep the innermost matches only
   const leaf = cands.filter(e => !cands.some(o => o !== e && e.contains(o)));
-  leaf.forEach((e, i) => e.setAttribute('data-z2u-ext', String(i)));
-  return leaf.length;
+  // keep only buttons that belong to ONE offer (its block shows exactly one offer id like #15095226);
+  // the bulk "Extend" in the toolbar belongs to the whole list and is skipped
+  const out = [];
+  for (const e of leaf) {
+    let anc = e.parentElement, id = null;
+    for (let k = 0; k < 15 && anc; k++, anc = anc.parentElement) {
+      const ids = (anc.innerText || '').match(/#\d{6,}/g);
+      if (!ids) continue;
+      const uniq = [...new Set(ids)];
+      if (uniq.length === 1 && leaf.filter(o => anc.contains(o)).length === 1) id = uniq[0];
+      break;
+    }
+    if (!id) continue;
+    e.setAttribute('data-z2u-ext', String(out.length));
+    out.push(id);
+  }
+  return out;
 }
 """
 
@@ -68,29 +82,31 @@ DIAG_JS = r"""
 
 
 def _extend_buttons(page):
+    """Return [(locator, offer_id)] for per-offer Extend buttons."""
     try:
-        n = page.evaluate(FIND_JS)
+        ids = page.evaluate(FIND_JS)
     except Exception:
-        n = 0
-    return [page.locator(f'[data-z2u-ext="{i}"]').first for i in range(n)]
+        ids = []
+    return [(page.locator(f'[data-z2u-ext="{i}"]').first, oid) for i, oid in enumerate(ids)]
 
 
-def _confirm(page, before_count):
-    """Click a confirm button that appeared in a popup after Extend, if any."""
+def _confirm(page):
+    """Click the confirm button of the popup that appears after Extend, if any."""
     page.wait_for_timeout(1500)
     for role in ("button", "link"):
         loc = page.get_by_role(role, name=CONFIRM_RE)
         for i in range(min(loc.count(), 10)):
             el = loc.nth(i)
             try:
-                if el.is_visible() and el.bounding_box():
-                    txt = (el.inner_text() or "").strip()
-                    if EXTEND_RE.match(txt) and len(_extend_buttons(page)) == before_count:
-                        continue
-                    el.click(timeout=5000)
-                    log(f"extend: clicked popup button '{txt}'")
-                    page.wait_for_timeout(1500)
-                    return True
+                if not el.is_visible():
+                    continue
+                if el.get_attribute("data-z2u-ext") is not None:
+                    continue
+                txt = (el.inner_text() or "").strip()
+                el.click(timeout=5000)
+                log(f"extend: clicked popup button '{txt}'")
+                page.wait_for_timeout(1500)
+                return True
             except Exception:
                 continue
     return False
@@ -116,35 +132,37 @@ def _list_pages(page):
     return hrefs or [LIST_URL]
 
 
-def _extend_on(page, url, dry_run):
+def _extend_on(page, url, dry_run, done_ids):
     _load(page, url)
-    n = len(_extend_buttons(page))
-    log(f"extend: {n} Extend button(s) on {url.split('//')[-1][:80]}")
-    if n == 0:
+    first = _extend_buttons(page)
+    todo = [oid for _, oid in first if oid not in done_ids]
+    log(f"extend: {len(first)} offer(s) on {url.split('//')[-1][:80]}, {len(todo)} not done yet")
+    if not first:
         try:
             log("extend: clickable texts on page: " + " | ".join(page.evaluate(DIAG_JS)[:60]))
         except Exception:
             pass
-        return 0
     if dry_run:
         return 0
     done = 0
-    for i in range(n):
-        if i > 0:
+    for oid in todo:
+        if done:
             _load(page, url)
-        btns = _extend_buttons(page)
-        if i >= len(btns):
-            break
-        try:
-            btns[i].scroll_into_view_if_needed(timeout=5000)
-            btns[i].click(timeout=8000)
-        except Exception as e:
-            log(f"extend: offer #{i + 1} click failed: {e.__class__.__name__}")
+        btn = next((b for b, o in _extend_buttons(page) if o == oid), None)
+        if btn is None:
+            log(f"extend: offer {oid} not found any more")
             continue
-        _confirm(page, len(btns))
+        try:
+            btn.scroll_into_view_if_needed(timeout=5000)
+            btn.click(timeout=8000)
+        except Exception as e:
+            log(f"extend: offer {oid} click failed: {e.__class__.__name__}")
+            continue
+        _confirm(page)
         page.wait_for_timeout(2000)
-        msgs = _messages(page)
-        log(f"extend: offer #{i + 1} extended" + (f" | site: {' / '.join(msgs)}" if msgs else ""))
+        msgs = [m for m in _messages(page) if m != "0" and "insufficient stock" not in m.lower()]
+        log(f"extend: offer {oid} extended" + (f" | site: {' / '.join(msgs)}" if msgs else ""))
+        done_ids.add(oid)
         done += 1
     return done
 
@@ -161,8 +179,11 @@ def extend_all(ctx, dry_run=False):
             log("extend: not logged in, skipped")
             return 0
         log(f"extend: {len(urls)} offer list page(s) to check")
-        for url in urls[:10]:
-            done += _extend_on(page, url, dry_run)
+        done_ids = set()
+        # check unfiltered lists first, then filtered ones (e.g. listing=low_stock)
+        urls = sorted(urls[:10], key=lambda u: "listing=" in u)
+        for url in urls:
+            done += _extend_on(page, url, dry_run, done_ids)
     except Exception as e:
         log(f"extend: problem {e.__class__.__name__}: {str(e)[:150]}")
     finally:
