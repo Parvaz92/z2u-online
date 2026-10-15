@@ -22,6 +22,10 @@ PAGES = [u for u in [os.environ.get("Z2U_URL"),
 RUN_MINUTES = int(os.environ.get("RUN_MINUTES", "345"))   # GitHub job limit is 360
 EXTEND_MINUTES = int(os.environ.get("EXTEND_MINUTES", "60"))
 BLOCK_ROTATE = int(os.environ.get("BLOCK_ROTATE", "3"))   # blocked rounds in a row -> fresh runner
+RECYCLE_MINUTES = int(os.environ.get("RECYCLE_MINUTES", "60"))  # fresh tab every hour (memory)
+CHROME_ARGS = ["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage",
+               "--disable-gpu", "--no-first-run", "--disable-extensions",
+               "--js-flags=--max-old-space-size=512"]
 MIN_WAIT, MAX_WAIT = 3 * 60, 6 * 60                       # refresh every 3-6 min
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
@@ -148,13 +152,13 @@ def main():
     bad_out = 0
     blocked = 0
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True,
-                                    args=["--disable-blink-features=AutomationControlled"])
+        browser = p.chromium.launch(headless=True, args=CHROME_ARGS)
         ctx = browser.new_context(user_agent=UA, viewport={"width": 1366, "height": 768},
                                   locale="en-US")
         ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
         ctx.add_cookies(cookies)
         page = ctx.new_page()
+        page_born = time.time()
         st, idx = open_good_page(page)
         log(f"opened, status: {st}")
         rounds = 0
@@ -166,6 +170,17 @@ def main():
             if time.time() >= deadline:
                 break
             next_extend = maybe_extend(ctx, next_extend)
+            if RECYCLE_MINUTES > 0 and time.time() - page_born > RECYCLE_MINUTES * 60:
+                # a tab open for hours slowly eats memory; swap it for a fresh one
+                try:
+                    new = ctx.new_page()
+                    page.close()
+                    page = new
+                    page_born = time.time()
+                    st, idx = open_good_page(page, idx)
+                    log(f"fresh tab opened, status: {st}")
+                except Exception as e:
+                    log(f"tab recycle problem: {e.__class__.__name__}")
             try:
                 page.reload(wait_until="domcontentloaded", timeout=90000)
                 time.sleep(4)
