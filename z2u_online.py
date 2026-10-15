@@ -5,15 +5,23 @@ stored in the repo secret Z2U_COOKIES. No password is ever used or printed.
 The page stays open (so the site's own live connection keeps you online) and is
 refreshed every few minutes. Every EXTEND_MINUTES (default 60, 0 = off) it also
 presses "Extend" on every offer in Active Offers (see z2u_extend.py).
-Exits with an error (red X + GitHub email) if you get logged out, so you know to
-refresh the cookies.
+If the site's bot check blocks this GitHub server, the run ends normally so the
+next run starts on a fresh server. Exits with an error (red X + GitHub email)
+only if you get logged out, so you know to refresh the cookies.
 """
 import json, os, random, sys, time, datetime
 from playwright.sync_api import sync_playwright
 
-START_URL = os.environ.get("Z2U_URL") or "https://www.z2u.com/"
+# Seller Center pages first: they keep the logged-in header (online dot) and are
+# less often behind the Cloudflare "Just a moment" check than the home page.
+PAGES = [u for u in [os.environ.get("Z2U_URL"),
+                     "https://www.z2u.com/sell/manage",
+                     "https://www.z2u.com/userCenter/index",
+                     "https://www.z2u.com/sellOrder/index",
+                     "https://www.z2u.com/"] if u]
 RUN_MINUTES = int(os.environ.get("RUN_MINUTES", "345"))   # GitHub job limit is 360
 EXTEND_MINUTES = int(os.environ.get("EXTEND_MINUTES", "60"))
+BLOCK_ROTATE = int(os.environ.get("BLOCK_ROTATE", "3"))   # blocked rounds in a row -> fresh runner
 MIN_WAIT, MAX_WAIT = 3 * 60, 6 * 60                       # refresh every 3-6 min
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
@@ -103,11 +111,42 @@ def maybe_extend(ctx, next_at):
     return time.time() + EXTEND_MINUTES * 60
 
 
+def wait_challenge(page, seconds=40):
+    """Give the Cloudflare 'Just a moment' check time to pass by itself."""
+    end = time.time() + seconds
+    st = state(page)
+    while st == "blocked" and time.time() < end:
+        time.sleep(4)
+        human_touch(page)
+        st = state(page)
+    return st
+
+
+def open_good_page(page, start_index=0):
+    """Try the pages in PAGES (starting at start_index) until one is not blocked.
+    Returns (state, index)."""
+    st, idx = "blocked", start_index % len(PAGES)
+    for k in range(len(PAGES)):
+        idx = (start_index + k) % len(PAGES)
+        try:
+            page.goto(PAGES[idx], wait_until="domcontentloaded", timeout=90000)
+            time.sleep(4)
+            st = wait_challenge(page)
+        except Exception as e:
+            log(f"open {PAGES[idx]} failed: {e.__class__.__name__}")
+            continue
+        log(f"page {PAGES[idx].split('//')[-1]} -> {st}")
+        if st != "blocked":
+            return st, idx
+    return st, idx
+
+
 def main():
     cookies = load_cookies()
     deadline = time.time() + RUN_MINUTES * 60
     next_extend = time.time() + 60          # first Extend round 1 minute after start
-    bad = 0
+    bad_out = 0
+    blocked = 0
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True,
                                     args=["--disable-blink-features=AutomationControlled"])
@@ -116,9 +155,8 @@ def main():
         ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
         ctx.add_cookies(cookies)
         page = ctx.new_page()
-        page.goto(START_URL, wait_until="domcontentloaded", timeout=90000)
-        time.sleep(5)
-        log(f"opened, status: {state(page)}")
+        st, idx = open_good_page(page)
+        log(f"opened, status: {st}")
         rounds = 0
         while time.time() < deadline:
             wait = random.randint(MIN_WAIT, MAX_WAIT)
@@ -132,21 +170,32 @@ def main():
                 page.reload(wait_until="domcontentloaded", timeout=90000)
                 time.sleep(4)
                 human_touch(page)
-                st = state(page)
+                st = wait_challenge(page)
+                if st == "blocked":
+                    st, idx = open_good_page(page, idx + 1)
             except Exception as e:
                 log(f"refresh problem: {e.__class__.__name__}, retry next round")
                 continue
             rounds += 1
-            if st in ("out", "blocked"):
-                bad += 1
-                log(f"WARNING: status = {st} ({bad}/2)")
-                if bad >= 2:
+            if st == "blocked":
+                blocked += 1
+                log(f"WARNING: all pages blocked by the site's bot check ({blocked}/{BLOCK_ROTATE})")
+                if blocked >= BLOCK_ROTATE:
+                    # Not a login problem: this GitHub server's IP is being challenged.
+                    # End this run normally so the next run starts on a fresh server/IP.
                     browser.close()
-                    if st == "out":
-                        sys.exit("LOGGED OUT: export fresh cookies and update the Z2U_COOKIES secret.")
-                    sys.exit("BLOCKED by the site's bot check from GitHub servers.")
+                    log("rotating: ending this run so the next one gets a fresh GitHub server")
+                    return
+                continue
+            blocked = 0
+            if st == "out":
+                bad_out += 1
+                log(f"WARNING: status = out ({bad_out}/2)")
+                if bad_out >= 2:
+                    browser.close()
+                    sys.exit("LOGGED OUT: export fresh cookies and update the Z2U_COOKIES secret.")
             else:
-                bad = 0
+                bad_out = 0
                 log(f"refresh #{rounds} ok (status: {st})")
         browser.close()
     log("run finished normally, next run takes over")
