@@ -2,6 +2,8 @@ name: z2u online
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
 
 permissions:
   actions: write
@@ -13,7 +15,7 @@ concurrency:
 
 jobs:
   online:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
       - name: Checkout
@@ -42,3 +44,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run online.yml --ref "${{ github.ref_name }}" --repo "${{ github.repository }}"
+
+      - name: Keep schedule enabled
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow enable online.yml --repo "${{ github.repository }}" || true
